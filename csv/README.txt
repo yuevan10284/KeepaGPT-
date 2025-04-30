@@ -1,0 +1,1 @@
+Place your Keepa CSV files in this folder. The backend will read and parse all CSVs here on startup. 
