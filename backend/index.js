@@ -44,15 +44,16 @@ function loadCSVs() {
   for (const file of files) {
     const content = fs.readFileSync(path.join(CSV_DIR, file), 'utf8');
     try {
-      const records = parse(content, {
-          columns: true, 
-          bom: true // Add this option to handle the BOM
-        });
+      const records = parse(content, { columns: true });
+      console.log(`Parsed ${records.length} rows from file: ${file}`); // <--- Added logging
       keepaData[file] = records;
     } catch (e) {
       console.error(`Failed to parse ${file}:`, e);
     }
   }
+  console.log(`Total files processed: ${Object.keys(keepaData).length}`);
+  
+  
 }
 
 // Placeholder for the vector store initialization
