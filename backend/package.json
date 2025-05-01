@@ -4,7 +4,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+   "start": "node index.js"
   },
   "dependencies": {
     "@langchain/community": "^0.0.31",
@@ -19,3 +19,5 @@
     "papaparse": "^5.5.2"
   }
 }
+
+
