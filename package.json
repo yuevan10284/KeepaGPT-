@@ -1,13 +1,13 @@
 {
   "dependencies": {
     "backend": "^0.0.0",
-    "express": "^4.18.2",
     "cors": "^2.8.5",
     "csv-parse": "^5.5.0",
-    "node-fetch": "^2.6.12",
     "dotenv": "^16.3.1",
-    "papaparse": "^5.4.1",
-    "hnswlib-node": "^1.4.2", 
-    "openai": "^3.3.0"
+    "express": "^4.18.2",
+    "hnswlib-node": "^1.4.2",
+    "node-fetch": "^2.6.12",
+    "openai": "^4.97.0",
+    "papaparse": "^5.4.1"
   }
 }

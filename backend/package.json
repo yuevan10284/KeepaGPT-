@@ -1,21 +1,33 @@
 {
   "name": "keepagpt-backend",
   "version": "1.0.0",
-  "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0 <22.0.0"
+  },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
-    "@langchain/community": "^0.0.31",
-    "@langchain/core": "^0.3.50",
-    "@langchain/openai": "^0.5.8",
+    "@langchain/core": "^0.3.51",
+    "@langchain/openai": "^0.5.10",
     "cors": "^2.8.5",
-    "csv-parse": "^5.6.0",
-    "dotenv": "^16.5.0",
-    "express": "^4.21.2",
+    "dotenv": "^16.0.3",
+    "express": "^5.1.0",
     "langchain": "^0.3.24",
-    "node-fetch": "^3.3.2",
-    "papaparse": "^5.5.2"
+    "lodash": "^4.17.21",
+    "p-retry": "^6.2.1",
+    "papaparse": "^5.4.1",
+    "sqlite": "^5.0.1",
+    "sqlite3": "^5.1.6",
+    "winston": "^3.17.0"
+  },
+  "optionalDependencies": {
+    "@langchain/community": "npm:null@^1.0.0",
+    "hnswlib-node": "^1.4.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
   }
 }
