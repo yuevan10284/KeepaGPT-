@@ -33,3 +33,8 @@ logs
 *.swo
 .DS_Store
 Thumbs.db
+
+# Large files
+*.db
+*.bin
+*.idx

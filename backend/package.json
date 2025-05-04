@@ -20,12 +20,10 @@
     "p-retry": "^6.2.1",
     "papaparse": "^5.4.1",
     "sqlite": "^5.0.1",
-    "sqlite3": "^5.1.6",
-    "winston": "^3.17.0"
+    "sqlite3": "^5.1.7"
   },
   "optionalDependencies": {
-    "@langchain/community": "npm:null@^1.0.0",
-    "hnswlib-node": "^1.4.2"
+    "@langchain/community": "npm:null@^1.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
