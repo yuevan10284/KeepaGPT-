@@ -364,13 +364,8 @@ async function importCSVToDatabase(filePath, filename) {
   });
 }
 
-// Setup vector store
 /**
- * Setup vector store with proper initialization
- * @returns {Promise<boolean>} Success state of vector store setup
- */
-/**
- * Setup vector store with proper initialization, checkpoints, and chunk processing
+ * Setup vector store with proper initialization and robust error handling
  * @returns {Promise<boolean>} Success state of vector store setup
  */
 async function setupVectorStore() {
@@ -391,29 +386,54 @@ async function setupVectorStore() {
 
     const vectorStorePath = path.join(vectorStoreDir, 'vectorstore.hnsw');
     const checkpointPath = path.join(vectorStoreDir, 'checkpoint.json');
+    const backupCheckpointPath = path.join(vectorStoreDir, 'checkpoint.backup.json');
 
-    // Create a new instance of your vector store with the embedding function
+    // Create a new instance of the vector store
     vectorStore = new HNSWVectorStore({
       generateEmbedding: generateEmbedding
     });
-
-    // Initialize the vector store explicitly
-    await vectorStore.initialize();
     
-    console.log('Vector store instance created');
-
-    // Load vector store from disk if available
+    // Try to load an existing vector store first
+    let loadedSuccessfully = false;
     if (fs.existsSync(`${vectorStorePath}.index`) && fs.existsSync(`${vectorStorePath}.json`)) {
-      console.log('Attempting to load vector store from disk...');
-      const loaded = await vectorStore.load(vectorStorePath);
-      if (loaded) {
-        console.log(`Successfully loaded vector store with ${vectorStore.documents.length} documents`);
-        return true;
-      } else {
-        console.warn('Failed to load vector store from disk, will build a new one');
+      console.log('Found existing vector store, attempting to load...');
+      try {
+        loadedSuccessfully = await vectorStore.load(vectorStorePath);
+        if (loadedSuccessfully) {
+          console.log(`Successfully loaded vector store with ${vectorStore.documents.length} documents`);
+          // Set the search parameters for better results
+          if (vectorStore.index) {
+            try {
+              vectorStore.index.setEf(100);
+              console.log("Search parameters configured");
+            } catch (efErr) {
+              console.warn(`Could not set search parameters: ${efErr.message}`);
+            }
+          }
+          return true;
+        }
+      } catch (loadError) {
+        console.error(`Error during vector store load: ${loadError}`);
+      }
+      
+      if (!loadedSuccessfully) {
+        console.warn('Failed to load existing vector store, will create a new one');
+        // Force clean start
+        await vectorStore.reset();
       }
     } else {
-      console.log('No existing vector store found, will build a new one');
+      console.log('No existing vector store found, will create a new one');
+      await vectorStore.initialize();
+    }
+
+    // Make sure we're initialized before proceeding
+    if (!vectorStore.initialized) {
+      console.log("Vector store not initialized, initializing now...");
+      const initialized = await vectorStore.initialize();
+      if (!initialized) {
+        console.error("Failed to initialize vector store, cannot continue");
+        return false;
+      }
     }
 
     console.log('Building new vector store...');
@@ -427,134 +447,289 @@ async function setupVectorStore() {
       return false;
     }
 
-    // Check for existing checkpoint
+    // Load checkpoint if exists - handle with care in case of corruption
     let offset = 0;
     let totalProcessed = 0;
     
     if (fs.existsSync(checkpointPath)) {
       try {
-        const checkpoint = JSON.parse(fs.readFileSync(checkpointPath, 'utf-8'));
+        const checkpointData = fs.readFileSync(checkpointPath, 'utf-8');
+        // Make a backup of the checkpoint file
+        fs.writeFileSync(backupCheckpointPath, checkpointData);
+        
+        const checkpoint = JSON.parse(checkpointData);
         offset = checkpoint.offset || 0;
         totalProcessed = checkpoint.processed || 0;
         console.log(`Resuming from checkpoint: processed ${totalProcessed} products, starting at offset ${offset}`);
       } catch (error) {
-        console.warn(`Error reading checkpoint, starting from beginning: ${error.message}`);
+        console.warn(`Error reading checkpoint: ${error.message}`);
+        
+        // Try to read from backup if available
+        if (fs.existsSync(backupCheckpointPath)) {
+          try {
+            const backupCheckpoint = JSON.parse(fs.readFileSync(backupCheckpointPath, 'utf-8'));
+            offset = backupCheckpoint.offset || 0;
+            totalProcessed = backupCheckpoint.processed || 0;
+            console.log(`Recovered from backup checkpoint: processed ${totalProcessed}, offset ${offset}`);
+          } catch (backupError) {
+            console.warn(`Backup checkpoint also corrupted: ${backupError.message}`);
+            offset = 0;
+            totalProcessed = 0;
+          }
+        } else {
+          // Reset if no backup
+          offset = 0;
+          totalProcessed = 0;
+        }
       }
     }
 
-    // Process in chunks with checkpoints
-    const CHUNK_SIZE = 5000; // Process 5000 rows at a time
-    const CHECKPOINT_INTERVAL = 1000; // Save checkpoint every 1000 documents
-    const SAVE_INTERVAL = 10000; // Save the vector store every 10000 documents
+    // Processing configuration
+    const CHUNK_SIZE = 5000; // Process rows in chunks
+    const EMBEDDING_BATCH_SIZE = 10; // Document batch size
+    const CHECKPOINT_INTERVAL = 1000; // Save checkpoint every N documents
+    const SAVE_INTERVAL = 10000; // Save vector store every N documents
+    const MAX_RETRIES = 3; // Maximum retries per chunk
     
     let lastCheckpoint = totalProcessed;
     let lastSave = totalProcessed;
     let batch = [];
 
-    while (true) {
-      // Fetch products in chunks
-      const products = await db.all(
-        `SELECT asin, title, brand, description, price, sales_rank, review_rating, review_count 
-         FROM products ORDER BY asin LIMIT ? OFFSET ?`, 
-        [CHUNK_SIZE, offset]
-      );
-      
-      if (products.length === 0) break;
-      
-      console.log(`Processing chunk of ${products.length} products starting at offset ${offset}`);
-      
-      for (const product of products) {
-        const textContent = `
-          Title: ${product.title || ''}\n
-          Brand: ${product.brand || ''}\n
-          Description: ${product.description || ''}\n
-          Sales Rank: ${product.sales_rank || ''}\n
-          Reviews: ${product.review_rating || ''}★ (${product.review_count || ''} reviews)\n
-        `;
+    // Main processing loop
+    let continueProcessing = true;
+    let currentRetry = 0;
+    
+    while (continueProcessing) {
+      try {
+        // Fetch products in chunks
+        const products = await db.all(
+          `SELECT asin, title, brand, description, price, sales_rank, review_rating, review_count 
+           FROM products ORDER BY asin LIMIT ? OFFSET ?`, 
+          [CHUNK_SIZE, offset]
+        );
+        
+        if (products.length === 0) {
+          console.log("No more products to process, finishing up");
+          break;
+        }
+        
+        console.log(`Processing chunk of ${products.length} products starting at offset ${offset}`);
+        
+        // Make sure the vector store is initialized before processing
+        if (!vectorStore.initialized) {
+          console.log("Vector store not ready, reinitializing...");
+          await vectorStore.initialize();
+        }
+        
+        // Process each product in the chunk
+        for (const product of products) {
+          const textContent = `
+            Title: ${product.title || ''}\n
+            Brand: ${product.brand || ''}\n
+            Description: ${product.description || ''}\n
+            Sales Rank: ${product.sales_rank || ''}\n
+            Reviews: ${product.review_rating || ''}★ (${product.review_count || ''} reviews)\n
+          `;
 
-        // Truncate long content for performance
-        const maxChars = 300;
-        const trimmedContent = textContent.length > maxChars 
-          ? textContent.slice(0, maxChars) + '...' 
-          : textContent;
+          // Truncate long content for performance
+          const maxChars = 300;
+          const trimmedContent = textContent.length > maxChars 
+            ? textContent.slice(0, maxChars) + '...' 
+            : textContent;
 
-        batch.push({
-          pageContent: trimmedContent,
-          metadata: {
-            asin: product.asin,
-            title: product.title,
-            source: 'database'
+          batch.push({
+            pageContent: trimmedContent,
+            metadata: {
+              asin: product.asin,
+              title: product.title,
+              source: 'database'
+            }
+          });
+
+          // Process in batches
+          if (batch.length >= EMBEDDING_BATCH_SIZE) {
+            const success = await vectorStore.addDocuments(batch);
+            if (!success) {
+              console.warn("Batch processing had errors, but continuing");
+            }
+            
+            totalProcessed += batch.length;
+            batch = [];
+            
+            // Save checkpoint periodically
+            if (totalProcessed - lastCheckpoint >= CHECKPOINT_INTERVAL) {
+              fs.writeFileSync(checkpointPath, JSON.stringify({
+                offset: offset + (totalProcessed - lastCheckpoint),
+                processed: totalProcessed,
+                timestamp: new Date().toISOString()
+              }));
+              lastCheckpoint = totalProcessed;
+              console.log(`Checkpoint saved: ${totalProcessed}/${productCount.count} products processed`);
+            }
+            
+            // Save vector store periodically
+            if (totalProcessed - lastSave >= SAVE_INTERVAL) {
+              console.log(`Saving vector store at ${totalProcessed} documents...`);
+              await vectorStore.save(vectorStorePath);
+              lastSave = totalProcessed;
+              console.log(`Vector store saved with ${vectorStore.documents.length} documents`);
+            }
           }
-        });
+        }
 
-        // Process in batches of EMBEDDING_BATCH_SIZE
-        if (batch.length >= EMBEDDING_BATCH_SIZE) {
+        // Process any remaining items in batch
+        if (batch.length > 0) {
           await vectorStore.addDocuments(batch);
           totalProcessed += batch.length;
           batch = [];
+        }
+        
+        // Update offset for next chunk and reset retry counter
+        offset += products.length;
+        currentRetry = 0;
+        
+        // Save checkpoint after successful chunk
+        fs.writeFileSync(checkpointPath, JSON.stringify({
+          offset: offset,
+          processed: totalProcessed,
+          timestamp: new Date().toISOString()
+        }));
+        console.log(`Processed ${totalProcessed}/${productCount.count} products for vector store`);
+        console.log(`Chunk complete. Checkpoint saved at offset ${offset}`);
+        
+        // Save vector store after each chunk
+        await vectorStore.save(vectorStorePath);
+        console.log(`Vector store saved with ${vectorStore.documents.length} documents`);
+        
+      } catch (error) {
+        console.error(`Error processing chunk: ${error.message}`);
+        console.error(`Stack: ${error.stack}`);
+        
+        // Implement retry logic
+        currentRetry++;
+        if (currentRetry <= MAX_RETRIES) {
+          console.log(`Retry attempt ${currentRetry}/${MAX_RETRIES}`);
           
-          // Save checkpoint periodically
-          if (totalProcessed - lastCheckpoint >= CHECKPOINT_INTERVAL) {
-            fs.writeFileSync(checkpointPath, JSON.stringify({
-              offset: offset + (totalProcessed - lastCheckpoint),
-              processed: totalProcessed,
-              timestamp: new Date().toISOString()
-            }));
-            lastCheckpoint = totalProcessed;
-            console.log(`Checkpoint saved: ${totalProcessed}/${productCount.count} products processed`);
-          }
+          // Try to reinitialize the vector store
+          console.log("Attempting to reset the vector store...");
+          await vectorStore.reset();
           
-          // Save vector store periodically
-          if (totalProcessed - lastSave >= SAVE_INTERVAL) {
-            console.log(`Saving vector store at ${totalProcessed} documents...`);
+          // Save current progress before retrying
+          fs.writeFileSync(checkpointPath, JSON.stringify({
+            offset: offset,
+            processed: totalProcessed,
+            timestamp: new Date().toISOString(),
+            lastError: error.message,
+            retry: currentRetry
+          }));
+          
+          // Wait a moment before retrying
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          // Next iteration will retry this chunk
+          continue;
+        } else {
+          console.error(`Max retries (${MAX_RETRIES}) exceeded for chunk at offset ${offset}`);
+          
+          // Save vector store with what we have so far
+          if (vectorStore.documents.length > 0) {
+            console.log(`Saving partial vector store with ${vectorStore.documents.length} documents`);
             await vectorStore.save(vectorStorePath);
-            lastSave = totalProcessed;
-            console.log(`Vector store saved with ${vectorStore.documents.length} documents`);
           }
+          
+          // Update checkpoint with error info
+          fs.writeFileSync(checkpointPath, JSON.stringify({
+            offset: offset,
+            processed: totalProcessed,
+            timestamp: new Date().toISOString(),
+            error: error.message,
+            status: 'failed_with_max_retries'
+          }));
+          
+          // Stop processing
+          continueProcessing = false;
+          break;
         }
       }
-
-      // Process any remaining items in this chunk
-      if (batch.length > 0) {
-        await vectorStore.addDocuments(batch);
-        totalProcessed += batch.length;
-        batch = [];
-      }
-      
-      // Update offset for next chunk
-      offset += products.length;
-      
-      // Save checkpoint after each chunk
-      fs.writeFileSync(checkpointPath, JSON.stringify({
-        offset: offset,
-        processed: totalProcessed,
-        timestamp: new Date().toISOString()
-      }));
-      console.log(`Processed ${totalProcessed}/${productCount.count} products for vector store`);
-      console.log(`Chunk complete. Checkpoint saved at offset ${offset}`);
-      
-      // Save vector store after each chunk to ensure persistence
-      await vectorStore.save(vectorStorePath);
-      console.log(`Vector store saved with ${vectorStore.documents.length} documents`);
     }
 
-    // Save the final vector store
-    console.log(`Vector store built with ${vectorStore.documents.length} documents, saving to disk...`);
-    await vectorStore.save(vectorStorePath);
-    console.log('Vector store saved to disk');
+    // Final save of the vector store
+    if (vectorStore.documents.length > 0) {
+      console.log(`Vector store built with ${vectorStore.documents.length} documents, saving final version...`);
+      await vectorStore.save(vectorStorePath);
+      console.log('Vector store saved to disk');
+    } else {
+      console.warn('No documents were added to the vector store');
+    }
     
-    // Clear the checkpoint file after successful completion
-    if (fs.existsSync(checkpointPath)) {
+    // Only remove checkpoint if fully successful
+    if (continueProcessing && fs.existsSync(checkpointPath)) {
       fs.unlinkSync(checkpointPath);
       console.log('Checkpoint file removed - process complete');
+      if (fs.existsSync(backupCheckpointPath)) {
+        fs.unlinkSync(backupCheckpointPath);
+      }
     }
     
-    return true;
+    return vectorStore.documents.length > 0;
   } catch (error) {
-    console.error(`Vector store setup error: ${error.message}`);
+    console.error(`Vector store setup critical error: ${error.message}`);
     console.error(`Full error:`, error);
     return false;
   }
+}
+
+// Define API routes
+function setupAPIRoutes() {
+  // Status endpoint
+  app.get('/api/status', (req, res) => {
+    res.json({
+      status: 'online',
+      vectorStore: vectorStore?.initialized ? 'ready' : 'not initialized',
+      documents: vectorStore?.documents?.length || 0
+    });
+  });
+
+  // Vector search endpoint
+  app.post('/api/vectorsearch', async (req, res) => {
+    const query = req.body.query;
+    if (!query || typeof query !== 'string') {
+      return res.status(400).json({ error: 'Missing search query' });
+    }
+
+    try {
+      const results = await vectorStore.similaritySearch(query, 10); // Top 10 results
+      res.json({ results });
+    } catch (error) {
+      console.error('Search error:', error);
+      res.status(500).json({ error: 'Search failed' });
+    }
+  });
+
+  // Example GET search endpoint (alternative for testing)
+  app.get('/search', async (req, res) => {
+    const query = req.query.q;
+    if (!query || typeof query !== 'string') {
+      return res.status(400).json({ error: 'Missing search query' });
+    }
+
+    try {
+      const results = await vectorStore.similaritySearch(query, 10); // Top 10 results
+      res.json({ results });
+    } catch (error) {
+      console.error('Search error:', error);
+      res.status(500).json({ error: 'Search failed' });
+    }
+  });
+
+  // Health check endpoint
+  app.get('/health', (req, res) => {
+    res.json({
+      status: 'healthy',
+      vectorStore: vectorStore?.initialized ? 'ready' : 'not initialized',
+      documents: vectorStore?.documents?.length || 0
+    });
+  });
 }
 
 // Server initialization
@@ -595,35 +770,8 @@ async function initServer() {
       console.log('Vector store setup complete and ready for search');
     }
     
-    // Setup API routes after vector store is ready
+    // Setup API routes - THIS IS THE KEY CHANGE
     console.log('Setting up API routes...');
-    function setupAPIRoutes() {
-      // Example search endpoint
-      app.get('/search', async (req, res) => {
-        const query = req.query.q;
-        if (!query || typeof query !== 'string') {
-          return res.status(400).json({ error: 'Missing search query' });
-        }
-    
-        try {
-          const results = await vectorStore.similaritySearch(query, 10); // Top 10 results
-          res.json({ results });
-        } catch (error) {
-          console.error('Search error:', error);
-          res.status(500).json({ error: 'Search failed' });
-        }
-      });
-    
-      // Optional: Health check endpoint
-      app.get('/health', (req, res) => {
-        res.json({
-          status: 'healthy',
-          vectorStore: vectorStore?.initialized ? 'ready' : 'not initialized',
-          documents: vectorStore?.documents?.length || 0
-        });
-      });
-    }
-    
     setupAPIRoutes();
     
     // Start server
@@ -641,7 +789,6 @@ async function initServer() {
     process.exit(1);
   }
 }
-
 
 // Start the server
 initServer();
