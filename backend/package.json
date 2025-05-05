@@ -5,7 +5,13 @@
   "engines": {
     "node": ">=18.0.0 <22.0.0"
   },
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0 <22.0.0"
+  },
   "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
@@ -23,4 +29,6 @@
   "devDependencies": {
     "nodemon": "^3.1.10"
   }
+}
+
 }
