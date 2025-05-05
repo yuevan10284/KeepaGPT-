@@ -6,7 +6,7 @@ const EXAMPLES = [
   'Any trends suggesting I should restock?',
   "What's the best seller in this list?",
   'Which ASIN dropped in price most in the last 30 days?',
-  'Summarize the price trends of each product.'
+  'Summarize the price trends for each product.'
 ];
 
 function ExampleMarquee({ onExample }) {
@@ -38,34 +38,45 @@ export default function Home() {
   const [streamedAnswer, setStreamedAnswer] = useState('');
   const messagesEndRef = useRef(null);
 
+  
   const handleSend = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
-    setMessages([...messages, { role: 'user', content: input }]);
+  
+    const userMessage = input.trim();
+    setMessages([...messages, { role: 'user', content: userMessage }]);
     setIsLoading(true);
     setStreamedAnswer('');
-    const res = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: input }),
-    });
-    if (!res.body) {
+    setInput(''); // Clear input right away for better UX
+  
+    try {
+      // Using the API route that will handle communication with the backend
+      const res = await fetch("/api/vectorsearch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: userMessage }),
+      });
+  
+      if (!res.ok) {
+        throw new Error(`Error: ${res.status}`);
+      }
+  
+      // Get the formatted text response
+      const answer = await res.text();
+      
+      // Format the response as a chat message
+      setMessages(msgs => [...msgs, { role: "assistant", content: answer }]);
+    } catch (error) {
+      console.error("Request error:", error);
+      setMessages(msgs => [
+        ...msgs,
+        { role: "assistant", content: "❌ Error: " + error.message },
+      ]);
+    } finally {
       setIsLoading(false);
-      return;
     }
-    const reader = res.body.getReader();
-    let answer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = new TextDecoder().decode(value);
-      answer += chunk;
-      setStreamedAnswer(answer);
-    }
-    setMessages((msgs) => [...msgs, { role: 'assistant', content: answer }]);
-    setIsLoading(false);
-    setInput('');
   };
+  
 
   const handleExample = (ex) => {
     setInput(ex);
