@@ -38,3 +38,7 @@ Thumbs.db
 *.db
 *.bin
 *.idx
+
+# Vectorstore files
+/backend/vectorstore/vectorstore.hnsw*
+/backend/vectorstore/checkpoint.json
