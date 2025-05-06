@@ -35,9 +35,15 @@ export default function Home() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [streamedAnswer, setStreamedAnswer] = useState('');
+  const [error, setError] = useState(null);
   const messagesEndRef = useRef(null);
 
+  // Auto-scroll to bottom when messages change
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages]);
   
   const handleSend = async (e) => {
     e.preventDefault();
@@ -46,7 +52,7 @@ export default function Home() {
     const userMessage = input.trim();
     setMessages([...messages, { role: 'user', content: userMessage }]);
     setIsLoading(true);
-    setStreamedAnswer('');
+    setError(null);
     setInput(''); // Clear input right away for better UX
   
     try {
@@ -58,19 +64,43 @@ export default function Home() {
       });
   
       if (!res.ok) {
-        throw new Error(`Error: ${res.status}`);
+        // Try to get error details if available
+        const errorData = await res.text();
+        let errorMessage;
+        
+        try {
+          // Try to parse as JSON
+          const parsedError = JSON.parse(errorData);
+          errorMessage = parsedError.error || `Error ${res.status}: ${res.statusText}`;
+        } catch {
+          // If not JSON, use as text
+          errorMessage = `Error ${res.status}: ${errorData || res.statusText}`;
+        }
+        
+        throw new Error(errorMessage);
       }
   
-      // Get the formatted text response
-      const answer = await res.text();
+      // Get the response as text first
+      const responseText = await res.text();
+      let formattedResponse;
       
-      // Format the response as a chat message
-      setMessages(msgs => [...msgs, { role: "assistant", content: answer }]);
+      try {
+        // Try to parse as JSON
+        const jsonResponse = JSON.parse(responseText);
+        formattedResponse = jsonResponse.response || responseText;
+      } catch {
+        // If not JSON, use as text
+        formattedResponse = responseText;
+      }
+      
+      // Add the response to chat
+      setMessages(msgs => [...msgs, { role: "assistant", content: formattedResponse }]);
     } catch (error) {
       console.error("Request error:", error);
+      setError(error.message);
       setMessages(msgs => [
         ...msgs,
-        { role: "assistant", content: "❌ Error: " + error.message },
+        { role: "assistant", content: `❌ Error: ${error.message}` },
       ]);
     } finally {
       setIsLoading(false);
@@ -81,6 +111,35 @@ export default function Home() {
   const handleExample = (ex) => {
     setInput(ex);
   };
+
+  // Display backend status
+  const [backendStatus, setBackendStatus] = useState("unknown");
+  
+  useEffect(() => {
+    // Check backend status when component mounts
+    const checkBackendStatus = async () => {
+      try {
+        const res = await fetch("http://localhost:5000/api/health", { 
+          method: "GET",
+          headers: { "Content-Type": "application/json" }
+        });
+        
+        if (res.ok) {
+          setBackendStatus("online");
+        } else {
+          setBackendStatus("error");
+        }
+      } catch (error) {
+        setBackendStatus("offline");
+      }
+    };
+    
+    checkBackendStatus();
+    // Check status every 30 seconds
+    const interval = setInterval(checkBackendStatus, 30000);
+    
+    return () => clearInterval(interval);
+  }, []);
 
   return (
     <div className="relative min-h-screen flex flex-col items-center justify-center overflow-hidden bg-black">
@@ -93,6 +152,18 @@ export default function Home() {
         </div>
         <h1 className="text-4xl font-bold text-center mb-2 text-white">KeepaGPT</h1>
         <div className="text-center text-lg mb-6 text-gray-300">Instant insights from your Amazon product data</div>
+        
+        {/* Backend status indicator */}
+        <div className={`text-xs mb-2 px-2 py-1 rounded-full ${
+          backendStatus === "online" ? "bg-green-900 text-green-300" :
+          backendStatus === "offline" ? "bg-red-900 text-red-300" :
+          "bg-yellow-900 text-yellow-300"
+        }`}>
+          Backend: {backendStatus === "online" ? "Connected" : 
+                   backendStatus === "offline" ? "Not responding" : 
+                   "Checking..."}
+        </div>
+        
         <form onSubmit={handleSend} className="w-full flex flex-col items-center mb-2">
           <div className="w-full flex items-center border-2 border-gray-700 rounded-lg px-4 py-3 bg-gray-900 shadow-md">
             <input
@@ -118,8 +189,20 @@ export default function Home() {
             </span>
           </div>
         </form>
+        
+        {/* Error message if backend connection fails */}
+        {error && (
+          <div className="w-full p-3 mb-4 bg-red-900/50 border border-red-700 rounded-lg text-red-200 text-sm">
+            <strong>Connection Error:</strong> {error}
+            <div className="mt-1 text-xs">
+              Make sure your backend server (port 5000) is running. Check the console for more details.
+            </div>
+          </div>
+        )}
+        
         {/* Auto-scrolling example searches */}
         <ExampleMarquee onExample={handleExample} />
+        
         {/* Chat history below search area, only show if there are messages or loading */}
         {(messages.length > 0 || isLoading) && (
           <div className="w-full max-w-2xl bg-gray-900 border border-gray-700 rounded-lg shadow p-6 flex flex-col space-y-2 min-h-[100px]">
@@ -134,7 +217,7 @@ export default function Home() {
             {isLoading && (
               <div className="text-left">
                 <span className="bg-gray-800 text-gray-200" style={{ borderRadius: '0.5rem', padding: '0.5rem 1rem', display: 'inline-block' }}>
-                  {streamedAnswer || <span className="animate-pulse">Thinking...</span>}
+                  <span className="animate-pulse">Thinking...</span>
                 </span>
               </div>
             )}
@@ -148,4 +231,4 @@ export default function Home() {
       </div>
     </div>
   );
-} 
+}

@@ -1,7 +1,16 @@
 export default async function handler(req, res) {
   try {
-    // Set up streaming response headers
-    res.setHeader("Content-Type", "text/plain");
+    // Set response headers
+    res.setHeader("Content-Type", "application/json");
+    
+    // Make sure we have a query
+    const userQuery = req.body.query || req.body.question;
+    if (!userQuery) {
+      return res.status(400).json({ 
+        error: 'Missing search query parameter',
+        status: 'error'
+      });
+    }
     
     // Forward the request to the backend
     const backendRes = await fetch("http://localhost:5000/api/vectorsearch", {
@@ -10,65 +19,38 @@ export default async function handler(req, res) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ 
-        query: req.body.query || req.body.question // Support both query formats
+        query: userQuery
       }),
     });
 
     if (!backendRes.ok) {
-      throw new Error(`Backend returned status: ${backendRes.status}`);
+      // Handle error responses from backend
+      const errorData = await backendRes.json().catch(() => ({ 
+        error: `Backend returned status: ${backendRes.status}` 
+      }));
+      
+      throw new Error(errorData.error || `Backend error: ${backendRes.status}`);
     }
 
-    // Stream the backend response to the frontend
-    const reader = backendRes.body.getReader();
-    const decoder = new TextDecoder();
-    
-    // Process chunks of data from backend
-    let buffer = "";
-    let productData = [];
-    
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      
-      // Add new chunk to buffer and process
-      buffer += decoder.decode(value, { stream: true });
-      
-      // Process complete lines in buffer
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || ""; // Keep the last incomplete chunk in buffer
-      
-      // Process each complete line
-      lines.forEach(line => {
-        if (line.trim()) {
-          try {
-            const product = JSON.parse(line);
-            productData.push(product);
-          } catch (e) {
-            console.error("Error parsing product data:", e);
-          }
-        }
-      });
-    }
-    
-    // Process any remaining data in buffer
-    if (buffer.trim()) {
-      try {
-        const product = JSON.parse(buffer);
-        productData.push(product);
-      } catch (e) {
-        console.error("Error parsing final product data:", e);
-      }
-    }
+    // Parse the JSON response from backend
+    const searchResults = await backendRes.json();
     
     // Generate a response based on the product data
-    const response = formatProductDataResponse(req.body.query || req.body.question, productData);
+    const formattedResponse = formatProductDataResponse(userQuery, searchResults.results);
     
     // Send the formatted response
-    res.write(response);
-    res.end();
+    res.status(200).json({ 
+      response: formattedResponse,
+      rawResults: searchResults.results,
+      query: userQuery,
+      count: searchResults.results.length
+    });
   } catch (error) {
     console.error("API route error:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: error.message,
+      status: 'error'
+    });
   }
 }
 
@@ -78,26 +60,24 @@ function formatProductDataResponse(question, productData) {
     return "I couldn't find any relevant products matching your query.";
   }
   
-  // Handle special case for empty database message
-  if (productData.length === 1 && productData[0].metadata && productData[0].metadata.status === "empty_database") {
-    return productData[0].pageContent || "The product database is empty. Please import CSV data first.";
-  }
-  
-  // Extract product titles for the response
+  // Extract product information from the search results
   const products = productData.map(item => {
     const metadata = item.metadata || {};
     return {
       title: metadata.title || "Unknown product",
       asin: metadata.asin || "Unknown ASIN",
-      score: item.score ? (1 - item.score).toFixed(2) : "N/A" // Convert distance to similarity score
+      // Convert score to a percentage if available
+      relevance: item.score !== undefined ? 
+        Math.round((1 - item.score) * 100) + '%' : 
+        "N/A"
     };
   });
   
   // Create a response based on the question and found products
-  let response = `Based on your question "${question}", I found these relevant products:\n\n`;
+  let response = `Based on your query "${question}", I found ${products.length} relevant products:\n\n`;
   
   products.forEach((product, index) => {
-    response += `${index + 1}. ${product.title} (ASIN: ${product.asin}, Relevance: ${product.score})\n`;
+    response += `${index + 1}. ${product.title} (ASIN: ${product.asin}, Relevance: ${product.relevance})\n`;
   });
   
   response += "\nFor more detailed analysis on these products, you can ask specific questions about pricing trends, sales rank, or other metrics.";
